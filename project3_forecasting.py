@@ -495,90 +495,6 @@ def save_predictions_plot(predictions: pd.DataFrame) -> None:
     plt.close()
 
 
-def write_summary(
-    df: pd.DataFrame,
-    splits: SplitData,
-    stationarity: pd.DataFrame,
-    best_alpha: float,
-    sarima_order: tuple[int, int, int],
-    sarima_seasonal: tuple[int, int, int, int],
-    metrics_table: pd.DataFrame,
-    lstm_tuning: pd.DataFrame,
-) -> None:
-    best_lstm = lstm_tuning.iloc[0]
-    stationarity_md = dataframe_to_markdown(stationarity)
-    metrics_md = dataframe_to_markdown(metrics_table)
-    arch_path = RESULT_DIR / "arch_lm_test.csv"
-    arch_table = pd.read_csv(arch_path) if arch_path.exists() else pd.DataFrame()
-    arch_md = dataframe_to_markdown(arch_table) if not arch_table.empty else ""
-    if not arch_table.empty and (arch_table["lm_pvalue"] < 0.05).any():
-        arch_conclusion = "ARCH-LM 检验的 p 值较小，说明 SARIMA 残差中可能存在 ARCH 效应，即波动大小可能仍有一定持续性。"
-    else:
-        arch_conclusion = "ARCH-LM 检验没有给出很强的 ARCH 效应证据。这里把 ARCH 分析作为补充诊断，不改变本文的一步预测比较结论。"
-    lines = [
-        "# Project3 HY OAS 单步预测总结",
-        "",
-        "预测任务设定为日度 HY OAS 的 one-step-ahead forecasting。本文不做长期多步预测，所有测试集预测均使用一步向前滚动方式，并在每一步使用已经观察到的真实历史值更新信息集。",
-        "",
-        "## 数据与划分",
-        "- 数据来自 FRED，变量为 ICE BofA US High Yield Index Option-Adjusted Spread，代码为 BAMLH0A0HYM2。",
-        "- 数据频率为日度，单位为 percent。HY OAS 反映高收益债信用利差，数值上升通常表示信用风险或市场避险情绪上升。",
-        f"- 清洗后样本区间：{df['date'].min().date()} 至 {df['date'].max().date()}",
-        f"- 样本量：{len(df)}",
-        f"- 清洗后缺失值数量：{int(df.isna().sum().sum())}",
-        f"- 训练集：{splits.train['date'].min().date()} 至 {splits.train['date'].max().date()}，{len(splits.train)} 个观测",
-        f"- 验证集：{splits.val['date'].min().date()} 至 {splits.val['date'].max().date()}，{len(splits.val)} 个观测",
-        f"- 测试集：{splits.test['date'].min().date()} 至 {splits.test['date'].max().date()}，{len(splits.test)} 个观测",
-        "",
-        "## 平稳性检验",
-        "本文主要使用 ADF 检验判断序列是否存在单位根，并结合时序图、ACF 和 PACF 图辅助观察。ADF 检验的原假设是序列存在单位根，也就是序列不平稳。如果 p 值较小，则拒绝原假设，可以认为序列更接近平稳。",
-        "",
-        stationarity_md,
-        "",
-        "原始 hy_oas 的 ADF p 值约为 0.050，结果比较接近 5% 水平，不能很稳地认为它平稳。log(hy_oas) 的 p 值为 0.079，也没有拒绝单位根。一阶差分后的 diff_log_hy_oas 的 ADF p 值接近 0，说明差分后序列更接近平稳。因此后续 SARIMA 在 log(hy_oas) 上允许 d=1 的差分结构。",
-        "ACF/PACF 图不作为正式平稳性检验，只用于辅助观察差分后序列的相关结构，并为 ARMA 或 SARIMA 定阶提供参考。",
-        "金融日度数据可能存在 5 个交易日周期，因此 SARIMA 候选模型中检查了 seasonal period = 5；但季节项未改善 BIC，所以最终模型退化为非季节 ARIMA。",
-        "",
-        "## 模型设定",
-        f"- Naive: y_hat[t] = y[t-1].",
-        f"- EWMA：在验证集上选择 alpha = {best_alpha:.2f}。",
-        f"- SARIMA：在 log(hy_oas) 上按 BIC 选模，最终 order = {sarima_order}, seasonal_order = {sarima_seasonal}。季节项未改善 BIC，因此退化为非季节 ARIMA 形式。",
-        "- ARIMA(0,1,0) 是随机游走形式，其一步预测等于上一期观测值。因此 SARIMA/ARIMA 与 Naive 的测试集预测误差完全一致是合理结果，不是代码错误。",
-        f"- LSTM：验证集最优 lookback = {int(best_lstm['lookback'])}, hidden size = {int(best_lstm['hidden_size'])}, early stopping epoch = {int(best_lstm['best_epoch'])}。",
-        "",
-        "## ARCH 效应辅助检查",
-        "除了残差自相关外，本文还检查了 SARIMA 残差平方的相关性。金融时间序列中常见波动聚集，即残差本身相关性不强，但残差平方可能有相关性。本文画出残差平方时序图和残差平方 ACF，并使用 ARCH-LM 检验作为辅助诊断。ARCH 部分不改变主模型，只作为后续可以使用 GARCH 模型的依据。",
-        "",
-        arch_md,
-        "",
-        arch_conclusion,
-        "",
-        "## 测试集误差",
-        metrics_md,
-        "",
-        "## 结论",
-        "LSTM 在测试集上取得最低误差，但相对 EWMA、SARIMA 和 Naive 的提升幅度很小，因此不能夸大深度学习模型优势。",
-        "HY OAS 具有短期惯性和风险冲击特征，阶段性变化与突发尖峰会使长期多步预测不稳定，因此本文重点比较短期 one-step-ahead 预测能力。SARIMA 可以刻画线性自相关结构，LSTM 可以尝试捕捉非线性动态，但在信用利差这种高持续性日度序列中，复杂模型不一定稳定优于 Naive 和 EWMA 等简单基准模型。测试结果也应围绕这些 benchmark 进行解释。",
-        "",
-    ]
-    (OUTPUT_DIR / "project3_summary.md").write_text("\n".join(lines), encoding="utf-8-sig")
-
-
-def dataframe_to_markdown(df: pd.DataFrame) -> str:
-    display = df.copy()
-    for col in display.columns:
-        if pd.api.types.is_float_dtype(display[col]):
-            display[col] = display[col].map(lambda x: "" if pd.isna(x) else f"{x:.6f}")
-    headers = [str(col) for col in display.columns]
-    rows = [[str(value) for value in row] for row in display.to_numpy()]
-    lines = [
-        "| " + " | ".join(headers) + " |",
-        "| " + " | ".join(["---"] * len(headers)) + " |",
-    ]
-    lines.extend("| " + " | ".join(row) + " |" for row in rows)
-    return "\n".join(lines)
-
-
 def main() -> None:
     set_reproducible()
     ensure_dirs()
@@ -651,17 +567,6 @@ def main() -> None:
     metrics_table = metrics_table.rename(columns={"MAPE": "MAPE (%)"})
     metrics_table.to_csv(RESULT_DIR / "test_metrics.csv", index=False)
 
-    write_summary(
-        df,
-        splits,
-        stationarity,
-        best_alpha,
-        sarima_order,
-        sarima_seasonal,
-        metrics_table,
-        lstm_tuning,
-    )
-
     print("Project3 one-step-ahead forecasting completed.")
     print(f"Data period: {df['date'].min().date()} to {df['date'].max().date()}, n={len(df)}")
     print(f"Best EWMA alpha: {best_alpha:.2f}")
@@ -672,7 +577,6 @@ def main() -> None:
     print("Test metrics:")
     print(metrics_table.to_string(index=False))
     print()
-    print(f"Summary written to: {OUTPUT_DIR / 'project3_summary.md'}")
 
 
 if __name__ == "__main__":
